@@ -1,0 +1,96 @@
+import { useMemo, useState } from 'react'
+import { Filter, RotateCcw, SlidersHorizontal } from 'lucide-react'
+import { useSearchParams } from 'react-router-dom'
+import { ErrorBox, Loading } from '../components/State'
+import { AppHeader, Layer } from '../components/Shell'
+import { TripCard } from '../components/TripCard'
+import { cargoIds, vehicleKinds } from '../data/catalog'
+import { useI18n } from '../i18n'
+import { api } from '../lib/api'
+import { tripHours } from '../lib/format'
+import { readCriteria, toParams } from '../lib/search'
+import { saveSearch } from '../lib/storage'
+import { useAsync } from '../lib/useAsync'
+import type { SearchFilters, Trip } from '../types'
+
+type Sort = 'nearest' | 'cheapest' | 'fastest'
+const sortIds: Sort[] = ['nearest', 'cheapest', 'fastest']
+const duration = (trip: Trip) => tripHours(trip)
+const sorter = (sort: Sort) => (a: Trip, b: Trip) =>
+  sort === 'cheapest' ? a.pricePerKg - b.pricePerKg : sort === 'fastest' ? duration(a) - duration(b) : a.departureAt.localeCompare(b.departureAt)
+
+export function SearchPage() {
+  const { t, place, city, arrow } = useI18n()
+  const [params, setParams] = useSearchParams()
+  const criteria = useMemo(() => readCriteria(params), [params])
+  const [sort, setSort] = useState<Sort>('nearest')
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const [gpsOnly, setGpsOnly] = useState(false)
+
+  const query = useMemo(() => {
+    const q = new URLSearchParams()
+    if (Number(criteria.weight) >= 1) q.set('weight', criteria.weight)
+    if (criteria.cargo !== 'all') q.set('cargo', criteria.cargo)
+    if (criteria.vehicle !== 'all') q.set('vehicle', criteria.vehicle)
+    if (criteria.date) q.set('date', criteria.date)
+    if (gpsOnly) q.set('gps', 'true')
+    return q.toString()
+  }, [criteria, gpsOnly])
+
+  const { data, error, loading, reload } = useAsync(() => api<{ trips: Trip[] }>(`/trips?${query}`), [query])
+
+  const apply = (patch: Partial<SearchFilters>) => {
+    const next = { ...criteria, ...patch }
+    saveSearch(next)
+    setParams(toParams(next), { replace: true })
+  }
+  const reset = () => { setGpsOnly(false); apply({ vehicle: 'all', cargo: 'all', weight: '', date: '' }) }
+
+  const { exact, others } = useMemo(() => {
+    const all = data?.trips ?? []
+    const isExact = (trip: Trip) => trip.originId === criteria.origin && (criteria.destination === 'all' || trip.destinationId === criteria.destination)
+    return { exact: all.filter(isExact).sort(sorter(sort)), others: all.filter((trip) => !isExact(trip)).sort(sorter(sort)) }
+  }, [data, criteria, sort])
+  const total = exact.length + others.length
+
+  return (
+    <div className="screen has-cta">
+      <AppHeader title={t('results.title')} subtitle={`${city(criteria.origin)} ${arrow} ${place(criteria.destination)}`} fallback="/"
+        actions={<button type="button" className="icon-btn" onClick={() => setSheetOpen(true)} aria-label={t('results.filter')}><SlidersHorizontal size={24} /></button>} />
+
+      <div className="segmented" role="tablist" aria-label={t('results.sort')}>
+        {sortIds.map((id) => <button key={id} type="button" role="tab" aria-selected={sort === id} className={sort === id ? 'active' : ''} onClick={() => setSort(id)}>{t(`results.${id}`)}</button>)}
+      </div>
+
+      <div className="result-list">
+        {loading && !data && <Loading />}
+        {error !== undefined && <ErrorBox error={error} onRetry={reload} />}
+        {exact.map((trip) => <TripCard key={trip.id} trip={trip} weight={criteria.weight} />)}
+        {others.length > 0 && <h2 className="list-heading">{exact.length ? t('results.others') : t('results.noExact')}</h2>}
+        {others.map((trip) => <TripCard key={trip.id} trip={trip} weight={criteria.weight} />)}
+        {data && total === 0 && (
+          <div className="empty">
+            <span className="empty-icon"><Filter size={26} /></span>
+            <h2>{t('results.emptyTitle')}</h2>
+            <p>{t('results.emptyText')}</p>
+            <button type="button" className="btn-outline" onClick={reset}><RotateCcw size={16} /> {t('results.reset')}</button>
+          </div>
+        )}
+      </div>
+
+      <div className="cta-bar"><button type="button" className="btn-primary" onClick={() => setSheetOpen(true)}><Filter size={20} /> {t('results.filter')}</button></div>
+
+      <Layer open={sheetOpen} onClose={() => setSheetOpen(false)} variant="sheet" label={t('results.filter')}>
+        <div className="sheet-head"><h2>{t('results.filter')}</h2><button type="button" className="link-btn" onClick={reset}>{t('results.reset')}</button></div>
+        <div className="sheet-group"><h3>{t('form.vehicle')}</h3><div className="chips">{['all', ...vehicleKinds].map((id) => <button key={id} type="button" className={`chip ${criteria.vehicle === id ? 'on' : ''}`} onClick={() => apply({ vehicle: id })}>{t(`vehicle.${id}`)}</button>)}</div></div>
+        <div className="sheet-group"><h3>{t('form.cargo')}</h3><div className="chips">{['all', ...cargoIds].map((id) => <button key={id} type="button" className={`chip ${criteria.cargo === id ? 'on' : ''}`} onClick={() => apply({ cargo: id })}>{t(`cargo.${id}`)}</button>)}</div></div>
+        <div className="sheet-group">
+          <h3>{t('results.services')}</h3>
+          <label className="switch-row"><span>{t('results.gpsOnly')}</span><input type="checkbox" checked={gpsOnly} onChange={(event) => setGpsOnly(event.target.checked)} /></label>
+        </div>
+        <button type="button" className="btn-primary" onClick={() => setSheetOpen(false)}>{t('results.show', { n: total })}</button>
+      </Layer>
+    </div>
+  )
+}
+
